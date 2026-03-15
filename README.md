@@ -6,7 +6,7 @@ Rocket telemetry streams are high-frequency time-series signals that capture the
 
 This project uses publicly available telemetry from the SpaceX CRS-10 mission to ask a concrete question: **can unsupervised statistical anomaly detection methods identify real, known flight events without being told what to look for?**
 
-The CRS-10 dataset is well-suited for this because it includes a ground truth events file — timestamps for five confirmed flight milestones — that can serve as a validation set.
+The CRS-10 dataset is well-suited for this because it includes a ground truth events file: timestamps for five confirmed flight milestones. These timestamps can serve as a validation set.
 
 | Event | Time (s) |
 |---|---|
@@ -22,7 +22,7 @@ The CRS-10 dataset is well-suited for this because it includes a ground truth ev
 
 Global statistical methods (Z-score, IQR) will struggle to detect mid-flight events because they compute statistics over the entire flight duration. A rocket accelerating continuously produces a non-stationary signal — the distribution of acceleration values shifts over time. A reading that looks like an outlier early in flight may appear routine by the end.
 
-A locally-adaptive method — Rolling Z-score — should outperform the global methods because it compares each measurement only to its recent neighbours, making it sensitive to sudden local deviations regardless of where they occur in the flight.
+A locally-adaptive method, like Rolling Z-score, should outperform the global methods because it compares each measurement only to its recent neighbours, making it sensitive to sudden local deviations regardless of where they occur in the flight.
 
 ---
 
@@ -32,7 +32,7 @@ All analysis is performed in Python using **Polars** for data manipulation, NumP
 
 ### Signal
 
-The EDA section explores the raw velocity gradient as an initial look at the signal's dynamics. All three detection methods in the comparative analysis are applied exclusively to the `acceleration` column from the pre-processed telemetry dataset — true sensor acceleration, not a numerically-differentiated estimate.
+The EDA section explores the raw velocity gradient as an initial look at the signal's dynamics. All three detection methods in the comparative analysis are applied exclusively to the `acceleration` column from the pre-processed telemetry dataset.
 
 ### Anomaly Detection Methods
 
@@ -44,10 +44,11 @@ The EDA section explores the raw velocity gradient as an initial look at the sig
 
 ### Evaluation
 
-Each method's detections are grouped into **detection bursts** — clusters of flagged points separated by gaps greater than 10 seconds. A burst is a true positive if it overlaps with any known event window (±5 seconds). This approach allows two summary metrics to be computed per method:
+Each method's detections are grouped into **detection bursts:** clusters of flagged points separated by gaps greater than 10 seconds. A burst is a true positive if it overlaps with any known event window (±5 seconds). This approach allows two summary metrics to be computed per method:
 
-- **Events Detected** — how many of the 5 known events had at least one burst land within their window (recall)
-- **Hit Rate** — events detected divided by total bursts raised; penalises methods that flood the signal with spurious detections (precision-like)
+- **Recall:** Events detected / 5 — how many known events the method found
+- **Precision (Hit Rate):** Events detected / total bursts raised — penalises methods that flood the signal with spurious detections
+- **F1:** Harmonic mean of precision and recall. The single summary metric used to rank methods
 
 ### Grid Search
 
@@ -63,19 +64,31 @@ IQR has no comparable free parameter and uses the fixed 1.5× convention through
 
 ### Detection Performance
 
-The results broadly support the hypothesis, with one important nuance.
+| Model | Hits | Misses | Recall | F1 |
+|---|---|---|---|---|
+| Z-score (t=0.7) | throttle_down_end, maxq, meco, ses1 | throttle_down_start | 0.80 | — |
+| IQR | meco, ses1 | throttle_down_start, throttle_down_end, maxq | 0.40 | — |
+| Rolling Z (t=0.7, w=30s) | throttle_down_start, throttle_down_end, meco, ses1 | maxq | 0.80 | — |
 
-MECO (t=143s) and SES-1 (t=154s) are detected by all three methods. These events produce sharp, large-magnitude acceleration discontinuities — the engine cutting and restarting — that stand out even when judged against the full flight distribution. For the global methods, these are the easiest events to find.
+*(F1 values update on re-run after precision formula fix)*
 
-The throttle-down manoeuvre (t=50–66s) and MaxQ (t=75s) are more discriminating. These events produce real but comparatively modest deviations. The global methods (Z-score, IQR) are less likely to flag them because their statistics are dominated by the high-acceleration late-flight phase, which sets a high bar for what counts as "unusual." The Rolling Z-score, comparing each point only to its local window, is not anchored to that global distribution and is therefore better positioned to catch these subtler early-flight events.
+Both Z-score and Rolling Z-score detected 4 of 5 events, but they disagreed on which event to miss — and that disagreement is the most interesting finding in the analysis.
 
-If a method detected an event that the other two missed, it is most likely the Rolling Z-score detecting a throttle-down or MaxQ event — precisely the scenario the hypothesis predicted.
+**Z-score missed throttle_down_start (t=50s).** The throttle-down start is a modest, controlled deceleration early in flight. Against the global distribution — dominated by the high-acceleration burn phase — it does not read as statistically unusual. The global mean and standard deviation are pulled toward late-flight values, raising the bar for what qualifies as an anomaly.
 
-### Hit Rate as the Key Metric
+**Rolling Z-score missed MaxQ (t=75s).** MaxQ is a gradual buildup of aerodynamic pressure that peaks at 75 seconds. Unlike an engine cutoff or stage event, it does not produce a sharp discontinuity — it is a smooth inflection. The local window of the Rolling Z-score adapts to this gradual change, normalising it away, whereas the global Z-score treats the overall peak as deviating from the full-flight mean.
 
-Events detected alone is an incomplete measure. A method that raises 50 bursts and catches 4 events is less useful than one that raises 7 bursts and catches the same 4, because in practice every false alarm requires investigation.
+**IQR detected only MECO and SES-1.** Without a tunable threshold, IQR is limited to the two most physically dramatic events — the engine hard-stop and restart — which produce acceleration changes large enough to clear any reasonable outlier bound.
 
-Hit rate (events detected / total bursts) captures this tradeoff in a single number. IQR's hit rate is fixed by convention, while both Z-score methods are tuned by grid search. The comparison reveals whether the optimised Z-score methods achieve high recall without sacrificing hit rate, and whether the Rolling Z-score's local adaptivity translates to fewer spurious bursts as well as more real detections.
+The partial confirmation of the hypothesis is notable: Rolling Z-score does catch throttle_down_start where Z-score fails, exactly as predicted. But the global Z-score's detection of MaxQ — which Rolling Z misses — shows the tradeoff runs both ways. Local adaptivity is an advantage for abrupt mid-flight events and a disadvantage for gradual peaks.
+
+### F1 as the Summary Metric
+
+Events detected alone is an incomplete measure. A method that raises 50 bursts and catches 4 events is less useful than one that raises 7 bursts and catches the same 4, because in practice every false alarm requires investigation. Equally, a method that raises only 1 burst and catches 1 event has perfect precision but useless recall.
+
+The F1 score — harmonic mean of precision (hit rate) and recall — captures both sides of this tradeoff in a single number. The harmonic mean is deliberately harsher than the arithmetic mean: it cannot be inflated by a very high score on one axis masking weakness on the other. A method with high recall but many spurious bursts scores poorly on precision and therefore on F1; a method with high precision but few detections scores poorly on recall.
+
+IQR's F1 is entirely determined by its fixed threshold and the data. Both Z-score methods are grid-search tuned, so their F1 reflects their best achievable performance on this signal. A higher F1 for Rolling Z-score would confirm that local adaptivity improves not just detection rate but the quality of each detection raised.
 
 ### Threshold Sensitivity and Robustness
 
@@ -95,7 +108,9 @@ Despite this, the directional finding is likely to generalise: locally-adaptive 
 
 ### Key Takeaway
 
-For non-stationary time-series like rocket telemetry, locally-adaptive anomaly detection outperforms global statistics — not just in peak detection rate, but in hit rate and robustness to hyperparameter choice. Grid search is a necessary step to make any threshold-dependent comparison honest, and the sequential threshold-then-window search for Rolling Z-score shows that both hyperparameters matter and interact in interpretable ways.
+Z-score and Rolling Z-score tie on recall (4/5) but capture different subsets of events. No single method dominates across all five events — the right choice depends on which type of event matters most. For abrupt early-flight manoeuvres (throttle changes), Rolling Z-score is structurally better suited. For smooth signal peaks like MaxQ, global statistics have an edge. IQR, without a tunable threshold, is limited to the most dramatic events only.
+
+Grid search is a necessary step to make any threshold-dependent comparison honest. The optimal threshold for both Z-score methods is 0.7 — substantially lower than the conventional defaults of 2.0–2.5 — which reflects how compressed the acceleration signal's variance is relative to the magnitude of real events on this mission.
 
 ---
 
